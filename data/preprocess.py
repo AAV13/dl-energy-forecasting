@@ -28,14 +28,15 @@ def load_and_clean(path):
     df = pd.read_csv(path, index_col=0, parse_dates=True, low_memory=False)
 
     # Merge the two price columns — critical fix for pre/post Oct 2018 zone split
-    df["price"] = df["DE_LU_price_day_ahead"].fillna(df["DE_AT_LU_price_day_ahead"])
-
+    df["price"] = df["DE_LU_price_day_ahead"].fillna(df["AT_price_day_ahead"])
     cols_needed = FEATURE_COLS + ["price"]
     df = df[cols_needed]
 
     # Interpolate short gaps, forward-fill longer ones
     df = df.interpolate(method="linear", limit=3)
     df = df.ffill()
+    df = df.bfill()
+    df = df.fillna(0)
 
     # Filter to study period
     df = df["2015-01-01":"2020-06-30"]
