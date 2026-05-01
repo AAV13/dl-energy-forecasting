@@ -11,7 +11,9 @@ class PatchEmbedding(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        # x: (batch, lookback, 1) for a single channel
+        # x: (batch, lookback, 1)
+        # squeeze channel dim: (batch, lookback)
+        x = x.squeeze(-1)
         # unfold into patches: (batch, num_patches, patch_len)
         x = x.unfold(dimension=1, size=self.patch_len, step=self.patch_len)
         x = self.projection(x)  # (batch, num_patches, d_model)
