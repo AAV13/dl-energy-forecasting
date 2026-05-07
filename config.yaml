@@ -6,15 +6,16 @@ batch_size: 64
 epochs: 50
 learning_rate: 0.0001
 weight_decay: 0.0001
-dropout: 0.1
+dropout: 0.2              
+fusion_temperature: 0.3
 d_model: 128
+d_ff: 512
 n_heads: 8
 n_layers: 3
-patience: 10
+patience: 20
 loss_weights:
   solar: 1.0
   wind_onshore: 1.0
-  wind_offshore: 1.0
   price: 2.0
 data:
   raw_path: data/time_series_60min_singleindex.csv
