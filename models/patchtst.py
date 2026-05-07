@@ -1,26 +1,28 @@
 import torch
 import torch.nn as nn
+import math
 
 
-class PatchEmbedding(nn.Module):
-    def __init__(self, patch_len, d_model, input_size, dropout=0.1):
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=100):
         super().__init__()
-        self.patch_len = patch_len
-        # projects each patch (patch_len * 1 channel) to d_model
-        self.projection = nn.Linear(patch_len, d_model)
-        self.dropout = nn.Dropout(dropout)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1).float()
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        # pe: (max_len, d_model)
+        self.register_buffer('pe', pe.unsqueeze(0))  # (1, max_len, d_model)
 
     def forward(self, x):
-        # x: (batch, lookback, 1)
-        # squeeze channel dim: (batch, lookback)
-        x = x.squeeze(-1)
-        # unfold into patches: (batch, num_patches, patch_len)
-        x = x.unfold(dimension=1, size=self.patch_len, step=self.patch_len)
-        x = self.projection(x)  # (batch, num_patches, d_model)
-        return self.dropout(x)
+        # x: (batch, num_patches, d_model)
+        return x + self.pe[:, :x.size(1), :]
 
 
 class CrossVariableFusion(nn.Module):
+    """Our extension — cross-attention over the 3 target variable representations."""
     def __init__(self, d_model, num_heads=2):
         super().__init__()
         self.cross_attn = nn.MultiheadAttention(
@@ -34,91 +36,115 @@ class CrossVariableFusion(nn.Module):
         # x: (batch, n_targets, d_model)
         attn_out, attn_weights = self.cross_attn(x, x, x)
         out = self.norm(x + attn_out)
-        # attn_weights: (batch, n_targets, n_targets) -- this is Figure 8
+        # attn_weights: (batch, n_targets, n_targets) — Figure 8
         return out, attn_weights
 
 
 class PatchTST(nn.Module):
     def __init__(
         self,
-        input_size,       # number of input channels (15)
-        n_targets,        # number of target variables (4)
-        patch_len,        # patch length (24)
-        lookback,         # lookback window (168)
-        horizon,          # forecast horizon (24)
+        input_size,       # 12 input channels
+        n_targets,        # 3 target variables
+        patch_len,        # 24 hours per patch
+        lookback,         # 168 hours
+        horizon,          # 24 hours
         d_model=128,
         n_heads=8,
         n_layers=3,
+        d_ff=512,
         dropout=0.1,
+        use_fusion=False, # PatchTST+ when True
         fusion_heads=2
     ):
         super().__init__()
-        self.input_size = input_size
+        self.use_fusion = use_fusion
         self.n_targets = n_targets
-        self.patch_len = patch_len
         self.horizon = horizon
         self.num_patches = lookback // patch_len  # 168 // 24 = 7
 
-        # one patch embedding per input channel (channel-independent)
-        self.patch_embeddings = nn.ModuleList([
-            PatchEmbedding(patch_len, d_model, 1, dropout)
-            for _ in range(input_size)
-        ])
+        # ── PATCH EMBEDDING ──────────────────────────────────────────
+        # Joint tokenization: all channels flattened into each patch
+        # Each patch: patch_len × input_size = 24 × 12 = 288 dims
+        patch_dim = patch_len * input_size
+        self.patch_len = patch_len
+        self.input_size = input_size
 
-        # shared transformer encoder across all channels
+        self.patch_embedding = nn.Sequential(
+            nn.Linear(patch_dim, d_model),
+            nn.LayerNorm(d_model),
+            nn.Dropout(dropout)
+        )
+
+        # ── POSITIONAL ENCODING ───────────────────────────────────────
+        self.pos_encoding = SinusoidalPositionalEncoding(d_model, max_len=self.num_patches + 10)
+
+        # ── TRANSFORMER ENCODER ───────────────────────────────────────
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
-            dim_feedforward=d_model * 4,
+            dim_feedforward=d_ff,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
+            norm_first=True   # Pre-Norm as shown in slides
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
 
-        # extract temporal attention from encoder for Figure 7
-        self.temporal_attn_weights = None
+        # ── OPTIONAL FUSION (PatchTST+) ───────────────────────────────
+        if use_fusion:
+            self.fusion = CrossVariableFusion(d_model, num_heads=fusion_heads)
 
-        # pool each channel's patch representations to a single vector
-        self.channel_pool = nn.Linear(self.num_patches * d_model, d_model)
+        # ── OUTPUT HEADS — one per target ────────────────────────────
+        # Flattened encoder output: num_patches × d_model = 7 × 128 = 896
+        flat_dim = self.num_patches * d_model
 
-        # cross-variable fusion over the 4 target variable representations
-        self.fusion = CrossVariableFusion(d_model, num_heads=fusion_heads)
-
-        # output head: project each target's fused representation to horizon steps
-        self.output_head = nn.Linear(d_model, horizon)
+        self.output_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(flat_dim, 256),
+                nn.GELU(),
+                nn.Linear(256, horizon)
+            )
+            for _ in range(n_targets)
+        ])
 
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        # x: (batch, lookback, input_size)
+        # x: (batch, lookback, input_size) = (B, 168, 12)
         batch_size = x.shape[0]
-        channel_reps = []
 
-        for i in range(self.input_size):
-            # extract single channel: (batch, lookback, 1)
-            ch = x[:, :, i:i+1]
-            # patch and embed: (batch, num_patches, d_model)
-            ch_patched = self.patch_embeddings[i](ch)
-            # encode: (batch, num_patches, d_model)
-            ch_encoded = self.encoder(ch_patched)
-            # pool patches to single vector: (batch, d_model)
-            ch_flat = ch_encoded.reshape(batch_size, -1)
-            ch_pooled = self.channel_pool(ch_flat)
-            channel_reps.append(ch_pooled)
+        # ── PATCH + EMBED ─────────────────────────────────────────────
+        # Unfold into patches: (B, num_patches, patch_len, input_size)
+        patches = x.unfold(dimension=1, size=self.patch_len, step=self.patch_len)
+        # Flatten channels into patch: (B, num_patches, patch_len * input_size)
+        patches = patches.reshape(batch_size, self.num_patches, -1)
+        # Project to d_model: (B, num_patches, d_model)
+        embedded = self.patch_embedding(patches)
 
-        # stack all channel representations: (batch, input_size, d_model)
-        all_reps = torch.stack(channel_reps, dim=1)
+        # ── POSITIONAL ENCODING ───────────────────────────────────────
+        embedded = self.pos_encoding(embedded)
 
-        # extract only target variable representations for fusion
-        # targets are: solar(idx2), wind_onshore(idx4), wind_offshore(idx5), price(idx8)
-        target_indices = [2, 4, 5, 8]
-        target_reps = all_reps[:, target_indices, :]  # (batch, 4, d_model)
+        # ── TRANSFORMER ENCODER ───────────────────────────────────────
+        encoded = self.encoder(embedded)   # (B, num_patches, d_model)
 
-        # cross-variable fusion with explicit attention weights
-        fused, attn_weights = self.fusion(target_reps)
-        # attn_weights: (batch, 4, 4) -- saved for interpretability
+        # ── FLATTEN ───────────────────────────────────────────────────
+        flat = encoded.reshape(batch_size, -1)  # (B, num_patches * d_model) = (B, 896)
 
-        # project each target to forecast horizon
-        out = self.output_head(fused)  # (batch, 4, horizon)
+        # ── OPTIONAL FUSION (PatchTST+) ───────────────────────────────
+        attn_weights = None
+        if self.use_fusion:
+            # Project flat to per-target representations for fusion
+            # Reshape to (B, n_targets, d_model) using first n_targets * d_model dims
+            target_reps = flat[:, :self.n_targets * 128].reshape(batch_size, self.n_targets, 128)
+            fused, attn_weights = self.fusion(target_reps)
+            # Inject fused info back — add to flat representation
+            flat = flat + fused.reshape(batch_size, -1)[:, :flat.shape[1]]
+
+        # ── OUTPUT HEADS ──────────────────────────────────────────────
+        outputs = []
+        for head in self.output_heads:
+            outputs.append(head(flat))  # each: (B, horizon)
+
+        # Stack: (B, n_targets, horizon)
+        out = torch.stack(outputs, dim=1)
 
         return out, attn_weights
