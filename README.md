@@ -1,7 +1,5 @@
 # Transformer-Based Forecasting of Renewable Energy & Electricity Prices
 
-**University of Maryland, College Park | DATA612 Deep Learning | Spring 2025**
-
 **Authors:** Ayush Vispute · Mukul Gupta · Nishant Lalge
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
