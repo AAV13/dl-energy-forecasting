@@ -4,7 +4,6 @@
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
 
@@ -108,7 +107,3 @@ We recommend running the notebooks via **Google Colab (T4 GPU)**.
 > **Tip:** For the full narrative and evaluation only, start directly at **Step 3** (`final_demo.ipynb`). It loads saved model weights and generates all final physical-unit evaluation tables and visualizations.
 
 ---
-
-## 📄 License
-
-This project is licensed under the [MIT License](https://opensource.org/licenses/MIT).
