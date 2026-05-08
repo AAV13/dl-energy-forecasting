@@ -61,6 +61,9 @@ We adapted the standard PatchTST architecture specifically for the physical cons
 
 > **Note:** The slight regression in median Price MAE is an accepted trade-off to unlock Q10/Q90 uncertainty quantification bounds for severe market crash scenarios.
 
+<img width="1668" height="1299" alt="image" src="https://github.com/user-attachments/assets/68eb1342-85ef-470d-b8fa-9dca8d7fa5d2" />
+
+
 ---
 
 ## 📂 Repository Structure
